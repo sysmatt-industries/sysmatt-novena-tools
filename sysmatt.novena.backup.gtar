@@ -1,0 +1,118 @@
+#!/bin/bash 
+# 20150119-1940 Matthew E Hoskins / Twitter: @sysmatt 
+#
+# Create a tar archive of / (slash) and /boot to capture Novena/Debian SD Card 
+#  os state.  Any other filesystems will not be backed up.  This utility is 
+#  intended to used in conjunction with sysmatt.novena.restore.sd which will 
+#  recreate a bootible SD card from a backup archive (tar.gz by default)
+#  This script currently only works on Novena /w a SD and SATA Root, 
+#   The disk identifier must be one of 0x4e6f764d (SD root) or 
+#   0x4e6f7653 (SATA Root)
+#
+#  Note:  This utility uses tar and has no special handling for open files.
+#         Any services with locked/active files should be shutdown (MySQL for 
+#         example) during the backup.  
+#
+#	  There is no special handling for special partition layouts, this
+#  	  script expects only / (slash) and /boot, like included in the 
+#	  factory images.
+#
+#  Arguments:
+#	(1) A FILE or DIRECTORY to write the tar backup to 
+#		If a DIRECTORY is provided, a filename will be generated
+#               based on hostname (uname -n) and timestamp in the following 
+#               format:
+#
+#			novena.HOSTNAME.YYYYMMDDHHMMSS.backup.tar.gz
+#
+#	(...)	Any additional arguments are passed to tar.  This can be 
+#		used to append options like --exclude etc
+#
+#
+#		The output FILE or DIRECTORY can be located on the SD
+#               being backed up provided there is space.  The destination
+#               file should be excluded from the backup by appending 
+# 		 --exclude=FILENAME to the command line.  
+#		Obviously, storing the backup on the same fileystem is not 
+#  	  	very useful if left there.  It's best to copy it after, 
+#  		or write it directly to a network share. 
+#
+#[END_HELP]
+
+#set -x  # debugging
+ME=`basename $0`
+
+bomb () {
+	echo "${ME} BOMB: ${1}" >&2
+	exit 1
+}
+
+say () {
+	echo "${ME}: ${1}" >&2
+}
+
+DEST="${1:?You must specify either a destination DIRECTORY, FILENAME or - (dash) for STDOUT, if you specify a DIRECTORY a filename will be composed of hostname and datestamp}"
+shift # Append any addtl options on tar command line
+
+if [ "x${DEST}" = "x-h" -o  "x${DEST}" = "x--help" ]
+then
+	grep -m1 -B999 "END_HELP"  "${0}"  
+	exit 1
+fi
+	
+
+if [ -d "${DEST}" ] 
+then
+	# We have a directory, generate the filename
+	TARBALL="${DEST}/novena.`uname -n`.`date +%Y%m%d%H%M%S`.backup.tar.gz"
+else
+	if [ "${DEST}" = "-" ]
+	then
+		# Writing to stdout, remember this script might be used in a pipe
+		#  and should respect STDOUT/STDERR
+		TARBALL="-"
+	else
+		# We assime its a full filename
+		TARBALL="${DEST}"
+	fi
+fi
+
+###############################################################################
+# Disk Identifier Handling
+###############################################################################
+# From Novena_Main_Page/Bootloader (Wiki):  If the *rootfs_ssd* flag is set in 
+#	the EEPROM, then the root parameter is set to **PARTUUID=4e6f7653-03**. 
+#	If the *rootfs_ssd* flag is not set, or if booting into recovery mode, 
+#	then the root parameter is set to **PARTUUID=4e6f764d-03**. This means 
+#	that you should set your disk up such that the root 
+#	partition is partition 3 (i.e. /dev/sda3), and set your disk ID correctly.
+# This script currently only works for SD and SATA root based installations, do 
+#	Disk Identifier must be one of 0x4e6f764d or 0x4e6f7653
+###############################################################################
+
+# Check existing boot device's Disk Identifier...
+CURRENT_BOOT_DEV=`mount  |grep 'on / ' |cut -d' ' -f1 | sed 's/p3$//' |sed 's/3$//'`
+[ -e "${CURRENT_BOOT_DEV}" 	] || bomb "Current Boot Device could not be determined [${CURRENT_BOOT_DEV}], internal error"
+CURRENT_DISK_IDENT=`fdisk -l "${CURRENT_BOOT_DEV}"  |grep 'Disk identifier:'  |cut -d' ' -f3`
+[ -z "${CURRENT_DISK_IDENT}" 	] && bomb "Current Boot Device Disk Identifier could not be determined, internal error"
+
+case "${CURRENT_DISK_IDENT}" in
+	0x4e6f764d)
+		# This is what we expect
+		DISK_IDENT="0x4e6f764d"
+		say "Disk Identifier is ${DISK_IDENT}, (a SD Root System)"
+		;;
+	0x4e6f7653)
+		DISK_IDENT="0x4e6f7653"
+		say "Disk Identifier is ${DISK_IDENT}, (a SATA Root System)"
+		;;
+	*)
+		# Unknown disk ident
+		bomb "Current Boot Device Disk Identifier [${CURRENT_DISK_IDENT}] is not known to this script.  Check for new version of script"
+esac
+
+
+# Run the tar archive, we exclude out dest file just in case
+tar --one-file-system -cvzf "${TARBALL}" $@ / /boot
+
+say "Created archive: ${TARBALL}"

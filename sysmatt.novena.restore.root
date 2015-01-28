@@ -1,0 +1,383 @@
+#!/bin/bash 
+# 20140804-1708 Matthew E Hoskins / Twitter: @sysmatt
+###############################################################################
+# sysmatt.novena.restore.sd - Re-create a Novena Boot Device (SD or SATA) from 
+#       a previously created tar backup.  Usually created using the related 
+#	script sysmatt.novena.backup.gtar
+#	
+# Note: Currently only supports SD and SATA Based root devices.  
+#
+
+
+###############################################################################
+# Config and Defaults
+###############################################################################
+ME=`basename $0`
+BOOT_SIZE="32M"
+DISKTYPE="sd"
+SWAP_SIZE_SD_DEFAULT="32M"
+SWAP_SIZE_SATA_DEFAULT="4G"
+# Where to find the spl file, include leading slash
+SPL_FILE="/boot/u-boot.spl"
+# Leave these blank...
+VERBOSE=""
+NOCONFIRM=""
+NOUMOUNT=""
+
+###############################################################################
+# Functions
+###############################################################################
+bomb (){
+	echo "BOMB: ${1}"
+	exit 1
+}
+
+getopt_help(){
+	cat <<__HELP__
+
+	${ME} [-v] [-y] [-s SIZE] [-H HOSTNAME] [-o OVERLAY] [-O CFGFILE] \\
+	                  [-n]  /dev/SD-DEVICE BACKUP-ARCHIVE ...
+
+	--verbose
+	-v		- Increase verbosity
+
+	--yes
+	-y		- Do not ask for confirmation (considered dangerious)
+			  (Normally we show you what will be destroyed, and 
+			   ask for confirmation)
+	--disktype
+	-d sd|sata	- Specify root disk type.  This changes multiple 
+			  defaults and behaviors.  Default is sd.
+
+			  SD Root Disk Defaults:
+			        Disk Identifier: 0x4e6f764d
+			              Swap Size: 32M
+			        Device in fstab: /dev/disk/by-path/platform-2198000.usdhc-part
+
+			SATA Root Disk Defaults:
+			        Disk Identifier: 0x4e6f7653
+			              Swap Size: 4G
+			        Device in fstab: /dev/sda
+
+			You will need to modify the Novena EEPROM to select 
+			which disk identifier it searches for when boots.  For 
+			SATA based systems, add the "sataroot" feature using the 
+			novena-eeprom utility.
+			
+			
+	--swapsize 
+	-s SIZE 	- Set swap partition size, 32M is Default
+			  This is passed to fdisk, can be any reasonable size 
+			  with uppercase M/G unit. 
+	--hostname 
+	-H hostname	- Overwrite /etc/hostname on the destination with 
+			  provided hostname. 
+	--overlay
+	-o TARFILE	- Un-tar one or more tar archives in the base of 
+			  new SD card.  Can be repeated. 
+	--openvpn	
+	-O CFGFILE	- Clear any existing cfg and place CFGFILE in 
+			  /etc/openvpn/
+
+	--noumount
+	-n		- Leave new SD Mounted to allow further modification
+			  after this program terminates.  
+
+	Note: this script currently only supports SD based root devices
+	      (ie, where your disk identifier is 0x4e6f764d)
+
+
+	
+__HELP__
+}
+
+human_confirm(){
+	local MESSAGE="${1}"
+	[ "${NOCONFIRM}x" == "yesx" ] && return
+	echo ""
+	echo ""
+	read -p ">>> Human Confirm: ${1}, Press ENTER to continue. CTRL-c to Abort"
+	echo ""
+	echo ""
+}
+
+###############################################################################
+# Command Line Argument Processing / Getop
+###############################################################################
+
+OPTS=`getopt -o H:s:hyvo:O:nd: \
+	--long disktype:,hostname:,swapsize:,help,yes,verbose,overlay:,openvpn:,noumount \
+	-n "${ME}"  -- "$@"`
+if [ $? != 0 ] ; then bomb "Unknown Error..."  ; fi
+eval set -- "$OPTS"
+while true ; do
+	case "$1" in
+		-H|--hostname) 	SET_HOSTNAME="$2"; 	shift 2 ;;
+		-s|--swapsize) 	OPT_SWAP_SIZE="$2"; 	shift 2 ;;
+		-v|--verbose) 	VERBOSE="yes"; 		shift 1 ;;
+		-d|--disktype) 	DISKTYPE="$2"; 		shift 2 ;;
+		-o|--overlay) 	OVERLAY_TAR_FILES="${OVERLAY_TAR_FILES} $2"; shift 2 ;;
+		-O|--openvpn) 	OPENVPN_CFG_FILES="${OPENVPN_CFG_FILES} $2"; shift 2 ;;
+		-y|--yes) 	NOCONFIRM="yes"; 	shift 1 ;;
+		-n|--noumount) 	NOUMOUNT="yes"; 	shift 1 ;;
+		-h|--help) 	getopt_help; 		exit 0 ;;
+		--) shift 	; break ;;
+		*) 		bomb "getopt error!" ; 	exit 1 ;;
+	esac
+done
+
+TAR_VERBOSE=""
+if [ "${VERBOSE}x" == "yesx" ] 
+then
+	TAR_VERBOSE="-v"
+fi
+
+
+###############################################################################
+# Two remaining params are the destination SD Device and the Backup TAR file 
+# to restore.
+###############################################################################
+DEST_DISK_DEVICE="${1:?You must specify one DESTINATION DISK/SD CARD DEVICE to destroy}"
+BACKUP_GTAR_FILENAME="${2:?You must specify one PI BACKUP SLASH GTAR file}"
+shift; shift;  # Remaining arguments are passed to tar
+
+###############################################################################
+# Temp random mountpoint under /tmp
+###############################################################################
+MOUNTPOINT="/tmp/novena.sd.${RANDOM}${$}"
+
+###############################################################################
+# Find binaries we need, some of which might be optional packages
+###############################################################################
+FDISK=`which fdisk`
+MKFSVFAT=`which mkfs.vfat`
+TAR=`which tar`
+[ -x "${FDISK}"        ] || bomb "Required utility [fdisk] Missing"
+[ -x "${MKFSVFAT}"     ] || bomb "Required utility [mkfs.vfat] Missing, Install dosfstools package"
+[ -x "${TAR}"          ] || bomb "Required utility [tar] Missing, Install tar package"
+
+###############################################################################
+# Disk Identifier Handling Notes
+###############################################################################
+# From Novena_Main_Page/Bootloader (Wiki):  If the *rootfs_ssd* flag is set in 
+#	the EEPROM, then the root parameter is set to **PARTUUID=4e6f7653-03**. 
+#	If the *rootfs_ssd* flag is not set, or if booting into recovery mode, 
+#	then the root parameter is set to **PARTUUID=4e6f764d-03**. This means 
+#	that you should set your disk up such that the root 
+#	partition is partition 3 (i.e. /dev/sda3), and set your disk ID correctly.
+# This script currently only works for SD  and SATA based installations, the
+#	Disk Identifier must be one of 0x4e6f764d or 0x4e6f7653
+###############################################################################
+
+# This is a placeholder, eventually we will need to handle multiple types
+#  for now this is the only type we support...
+case "${DISKTYPE}" in
+	sd|SD)
+		DISK_IDENT="0x4e6f764d"
+		SWAP_SIZE="${OPT_SWAP_SIZE:-${SWAP_SIZE_SD_DEFAULT}}"
+		# Internal MMC Slot
+		FSTAB_ROOT_DEVICE="/dev/disk/by-path/platform-2198000.usdhc-part"
+		;;
+	sata|SATA)
+		DISK_IDENT="0x4e6f7653"
+		SWAP_SIZE="${OPT_SWAP_SIZE:-${SWAP_SIZE_SATA_DEFAULT}}"
+		FSTAB_ROOT_DEVICE="/dev/sda"
+		;;
+	*)
+		bomb "Unknown DISK TYPE [${DISKTYPE}] specified"
+esac
+
+###############################################################################
+# Sanity check, are we already mounted?
+###############################################################################
+if mount |grep "${DEST_DISK_DEVICE}" 
+then
+	bomb "Destination device ${DEST_DISK_DEVICE} is mounted, un-mount and retry"
+fi
+
+###############################################################################
+# Display partition table we are about to destroy
+###############################################################################
+echo ""
+echo ""
+echo "=== Summary - Please Review  ==="
+echo "    Destination Disk Type: ${DISKTYPE}"
+echo " Disk Identifier to write: ${DISK_IDENT}  "
+echo "                Boot Size: ${BOOT_SIZE}"
+echo "                Swap Size: ${SWAP_SIZE}"
+echo "     Root Device in fstab: ${FSTAB_ROOT_DEVICE}"
+echo ""
+echo "     Will Restore Archive: ${BACKUP_GTAR_FILENAME} (Size: " `du -h "${BACKUP_GTAR_FILENAME}"|cut  -f1`")"
+echo ""
+echo "=== ${DEST_DISK_DEVICE} Current Partition Table - Will be destroyed! ==="
+$FDISK -l ${DEST_DISK_DEVICE} 
+echo ""
+human_confirm "Ready to DESTROY (re-partition) ${DEST_DISK_DEVICE}?"
+
+###############################################################################
+# re-partition
+###############################################################################
+# Orig wrote this to use PARTED but went back to fdisk since 
+# parted can not set disk identifier (seriously?)
+# Below mostly stolen from novena-image.sh
+$FDISK "${DEST_DISK_DEVICE}" -C32 -H32 <<__FDISK_OPS__ 
+o
+n
+p
+1
+
++${BOOT_SIZE}
+n
+p
+2
+
++${SWAP_SIZE}
+n
+p
+3
+
+
+t
+1
+b
+t
+2
+82
+x
+i
+${DISK_IDENT}
+r
+w
+q
+__FDISK_OPS__
+
+echo ""
+echo ""
+echo "=== ${DEST_DISK_DEVICE} NEW Partition Table ==="
+$FDISK -l ${DEST_DISK_DEVICE} 
+echo ""
+
+###############################################################################
+# Format and Mount
+###############################################################################
+# /dev/sd? devices...
+BOOT_DEVICE="${DEST_DISK_DEVICE}1"
+SWAP_DEVICE="${DEST_DISK_DEVICE}2"
+ROOT_DEVICE="${DEST_DISK_DEVICE}3"
+# Handle mmc devices...
+[ -e "${DEST_DISK_DEVICE}p1" ] && BOOT_DEVICE="${DEST_DISK_DEVICE}p1"
+[ -e "${DEST_DISK_DEVICE}p2" ] && SWAP_DEVICE="${DEST_DISK_DEVICE}p2"
+[ -e "${DEST_DISK_DEVICE}p3" ] && ROOT_DEVICE="${DEST_DISK_DEVICE}p3"
+
+human_confirm "Ready to create FILESYSTEMS?"
+mkfs.vfat       "${BOOT_DEVICE}"
+mkswap          "${SWAP_DEVICE}" 
+mkfs.ext4 -F -j "${ROOT_DEVICE}" 
+mkdir -p "${MOUNTPOINT}"
+mount "${ROOT_DEVICE}" "${MOUNTPOINT}"
+mkdir -p "${MOUNTPOINT}/boot"
+mount "${BOOT_DEVICE}" "${MOUNTPOINT}/boot"
+df -h "${MOUNTPOINT}" "${MOUNTPOINT}/boot"
+
+
+###############################################################################
+# Perform restore from tar archive
+###############################################################################
+human_confirm  "Ready to RESTORE IMAGE ${BACKUP_GTAR_FILENAME} to ${MOUNTPOINT}?"
+echo ""
+echo "Restoring GTAR archive ${BACKUP_GTAR_FILENAME} to ${MOUNTPOINT}"
+$TAR ${TAR_VERBOSE} $@ -xf  "${BACKUP_GTAR_FILENAME}" -C "${MOUNTPOINT}"
+
+###############################################################################
+# Install the SPL 
+###############################################################################
+SPL_FILE_PATH="${MOUNTPOINT}${SPL_FILE}"
+
+[ -e "${SPL_FILE_PATH}" ] || bomb "SPL FILE [${SPL_FILE_PATH}] MISSING, system will not boot."
+echo ""
+echo "Writing SPL [${SPL_FILE_PATH}] to SD device ${DEST_DISK_DEVICE}"
+dd if="${SPL_FILE_PATH}" of="${DEST_DISK_DEVICE}" bs=1024 seek=1 conv=notrunc
+
+###############################################################################
+# Modify /etc/fstab for root device
+###############################################################################
+DEST_FSTAB_FILE="${MOUNTPOINT}/etc/fstab"
+
+cp -f "${DEST_FSTAB_FILE}" "${DEST_FSTAB_FILE}.orig"
+F_ROOT_DEVICE="${FSTAB_ROOT_DEVICE}3"
+F_SWAP_DEVICE="${FSTAB_ROOT_DEVICE}2"
+
+# Filter and write fstab file, backup kept as fstab.orig
+cat "${DEST_FSTAB_FILE}.orig"						\
+	 |perl -pe '($dev,$mp,$rem)=split(/\s+/i,$_,3); next unless $mp eq    "/"; $_=join("\t","'"${F_ROOT_DEVICE}"'",$mp,$rem);' \
+	 |perl -pe '($dev,$mp,$rem)=split(/\s+/i,$_,3); next unless $mp eq "swap"; $_=join("\t","'"${F_SWAP_DEVICE}"'",$mp,$rem);' \
+	 > "${DEST_FSTAB_FILE}"
+
+###############################################################################
+# Set Hostname, if requested
+###############################################################################
+if [ "${SET_HOSTNAME}" ] 
+then
+	echo ""
+	echo "Wrote [${SET_HOSTNAME}] to ${MOUNTPOINT}/etc/hostname"
+	echo "${SET_HOSTNAME}" > "${MOUNTPOINT}/etc/hostname"
+fi
+
+###############################################################################
+# Add any overlay tar archives, if requested
+###############################################################################
+for OFILE in $OVERLAY_TAR_FILES
+do
+	echo ""
+	echo "Adding overlay ${OFILE}"
+	$TAR ${TAR_VERBOSE} -xf "${OFILE}"  -C "${MOUNTPOINT}"
+done
+
+###############################################################################
+# Install any openVPN config, if requested
+###############################################################################
+if [ "${OPENVPN_CFG_FILES}" ] 
+then
+	echo ""
+	echo "Clearing any existing OpenVPN config files"
+	rm -fv "${MOUNTPOINT}/etc/openvpn"/*.cfg "${MOUNTPOINT}/etc/openvpn"/*.conf
+	for OFILE in $OPENVPN_CFG_FILES
+	do
+		echo "Adding OpenVPN Config: ${OFILE}"
+		cp -av "${OFILE}" "${MOUNTPOINT}/etc/openvpn/"
+	done
+	chown root:root "${MOUNTPOINT}/etc/openvpn"/*.c*
+	chmod 0640      "${MOUNTPOINT}/etc/openvpn"/*.c*
+fi
+
+###############################################################################
+# Finalize, exit, optionally leave mounted if requested
+###############################################################################
+echo ""
+echo ""
+if [ "${NOUMOUNT}x"  == "yesx" ]
+then
+	echo ""
+	echo ""
+	echo "Leaving new SD Mounted at: ${MOUNTPOINT}"
+	echo "To un-mount, run: umount ${MOUNTPOINT}/boot; umount ${MOUNTPOINT}; rmdir ${MOUNTPOINT}"
+	echo ""
+	exit 0
+else
+	if [ "${NOCONFIRM}x" != "yesx" ] 
+	then
+		echo =DONE=
+		echo "The SD is mounted at: ${MOUNTPOINT}"
+		echo "Now would be a good time to make modifications in another shell session..."
+		human_confirm "Ready to un-mount ${MOUNTPOINT}?"
+		echo ""
+		echo ""
+	fi
+	echo "Un-mounting, this may take a moment..."
+	umount "${MOUNTPOINT}/boot"
+	umount "${MOUNTPOINT}"
+	rmdir "${MOUNTPOINT}"
+	exit 0
+fi
+
+
