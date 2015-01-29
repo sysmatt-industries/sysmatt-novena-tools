@@ -4,6 +4,8 @@
 # sysmatt.novena.restore.sd - Re-create a Novena Boot Device (SD or SATA) from 
 #       a previously created tar backup.  Usually created using the related 
 #	script sysmatt.novena.backup.gtar
+#
+# Run with -h for help
 #	
 # Note: Currently only supports SD and SATA Based root devices.  
 #
@@ -36,7 +38,7 @@ getopt_help(){
 	cat <<__HELP__
 
 	${ME} [-v] [-y] [-s SIZE] [-H HOSTNAME] [-o OVERLAY] [-O CFGFILE] \\
-	                  [-n]  /dev/SD-DEVICE BACKUP-ARCHIVE ...
+	                  [-n]  /dev/DEST-DEVICE BACKUP-ARCHIVE ...
 
 	--verbose
 	-v		- Increase verbosity
@@ -74,17 +76,14 @@ getopt_help(){
 			  provided hostname. 
 	--overlay
 	-o TARFILE	- Un-tar one or more tar archives in the base of 
-			  new SD card.  Can be repeated. 
+			  the destination root.  Can be repeated. 
 	--openvpn	
 	-O CFGFILE	- Clear any existing cfg and place CFGFILE in 
 			  /etc/openvpn/
 
 	--noumount
-	-n		- Leave new SD Mounted to allow further modification
+	-n		- Leave destination Mounted to allow further modification
 			  after this program terminates.  
-
-	Note: this script currently only supports SD based root devices
-	      (ie, where your disk identifier is 0x4e6f764d)
 
 
 	
