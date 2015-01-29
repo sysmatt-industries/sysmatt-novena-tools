@@ -42,7 +42,7 @@ getopt_help(){
 	-v		- Increase verbosity
 
 	--yes
-	-y		- Do not ask for confirmation (considered dangerious)
+	-y		- Do not ask for confirmation (considered dangerous)
 			  (Normally we show you what will be destroyed, and 
 			   ask for confirmation)
 	--disktype

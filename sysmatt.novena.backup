@@ -1,13 +1,13 @@
 #!/bin/bash 
 # 20150119-1940 Matthew E Hoskins / Twitter: @sysmatt 
 #
-# Create a tar archive of / (slash) and /boot to capture Novena/Debian SD Card 
+# Create a tar archive of / (slash) and /boot to capture Novena/Debian 
 #  os state.  Any other filesystems will not be backed up.  This utility is 
 #  intended to used in conjunction with sysmatt.novena.restore.sd which will 
-#  recreate a bootible SD card from a backup archive (tar.gz by default)
-#  This script currently only works on Novena /w a SD and SATA Root, 
-#   The disk identifier must be one of 0x4e6f764d (SD root) or 
-#   0x4e6f7653 (SATA Root)
+#  recreate a bootible SD card (and/or SATA root disk) from a backup archive 
+#  This script currently only works on Novena /w a SD or SATA Root, 
+#   The disk identifier must be one of 0x4e6f764d (NovM, SD root) or 
+#   0x4e6f7653 (NovS, SATA Root)
 #
 #  Note:  This utility uses tar and has no special handling for open files.
 #         Any services with locked/active files should be shutdown (MySQL for 
@@ -15,7 +15,8 @@
 #
 #	  There is no special handling for special partition layouts, this
 #  	  script expects only / (slash) and /boot, like included in the 
-#	  factory images.
+#	  factory images.  Additional partitions will not break execution, 
+#	  but they will also not get backed up or restored.
 #
 #  Arguments:
 #	(1) A FILE or DIRECTORY to write the tar backup to 
@@ -25,17 +26,24 @@
 #
 #			novena.HOSTNAME.YYYYMMDDHHMMSS.backup.tar.gz
 #
+#		If a dash (-) is provided as FILE, the compressed tar
+#		 archive will be written to STDOUT for easy piping elsewhere
+#
 #	(...)	Any additional arguments are passed to tar.  This can be 
-#		used to append options like --exclude etc
+#		used to append options like --exclude 
 #
 #
 #		The output FILE or DIRECTORY can be located on the SD
 #               being backed up provided there is space.  The destination
 #               file should be excluded from the backup by appending 
 # 		 --exclude=FILENAME to the command line.  
-#		Obviously, storing the backup on the same fileystem is not 
+#		Obviously, storing the backup on the same filesystem is not 
 #  	  	very useful if left there.  It's best to copy it after, 
 #  		or write it directly to a network share. 
+# 
+#		To write the backup to a remote file via ssh, you can do:
+#
+#		# sysmatt.novena.backup.gtar - |ssh USER@HOSTNAME dd of=FILENAME.tar.gz 
 #
 #[END_HELP]
 
