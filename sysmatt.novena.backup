@@ -43,7 +43,7 @@
 # 
 #		To write the backup to a remote file via ssh, you can do:
 #
-#		# sysmatt.novena.backup.gtar - |ssh USER@HOSTNAME dd of=FILENAME.tar.gz 
+#		# sysmatt.novena.backup - |ssh USER@HOSTNAME dd of=FILENAME.tar.gz 
 #
 #[END_HELP]
 
